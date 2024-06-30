@@ -1,17 +1,13 @@
+mod error;
 mod utils;
 
 use bytes::Bytes;
-use http::header;
-use http_body_util::{combinators::BoxBody, BodyExt, Empty, Full};
-use hyper::client::conn::http1::Builder;
-use hyper::server::conn::http1;
-use hyper::service::service_fn;
-use hyper::upgrade::Upgraded;
-use hyper::{Method, Request, Response};
+use error::Result;
+use http::{header, uri::Uri};
+use http_body_util::{combinators::BoxBody, BodyExt, Full};
+use hyper::{server::conn::http1, service::service_fn, Request, Response};
 use log::info;
-use std::collections::{hash_map, HashMap};
-use std::error::Error;
-use std::net::SocketAddr;
+use std::{collections::HashMap, error::Error, net::SocketAddr};
 use tokio::net::{TcpListener, TcpStream};
 use utils::tokio_adapter::TokioIo;
 
@@ -43,76 +39,64 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
-
 struct ProxyConfig {
-    path : String,
-    remote_url: String,
+    path: String,
+    redirect_url: Uri,
 }
 
 async fn proxy(
     req: Request<hyper::body::Incoming>,
 ) -> Result<Response<BoxBody<Bytes, hyper::Error>>, Box<dyn Error + Send + Sync>> {
-
-   let  proxy_configs = HashMap::from([
-     (String::from("/archlinux"), ProxyConfig{
-        path: String::from("/archlinux"),
-        remote_url: String::from("http://mirrors.bfsu.edu.cn/archlinux"),
-     }),
-     (String::from("/docker"), ProxyConfig{
-        path: String::from("/docker"),
-        remote_url: String::from("https://registry.docker.com"),
-     }),
-   ]);
+    let proxy_configs = HashMap::from([
+        (
+            String::from("archlinux"),
+            ProxyConfig {
+                path: String::from("/archlinux"),
+                redirect_url: Uri::from_static("http://mirrors.bfsu.edu.cn/archlinux"),
+            },
+        ),
+        (
+            String::from("docker"),
+            ProxyConfig {
+                path: String::from("/docker"),
+                redirect_url: Uri::from_static("https://registry.docker.com"),
+            },
+        ),
+    ]);
 
     let uri = req.uri();
-
-   let paths: Vec<&str> =  String::from(uri.path()).splitn(3, "/").collect();
-
- let match_path=   match paths.get(1) {
-    Some(path) =>  String::from(*path),
-    None => String::new(),
-   };
-
-let proxy_config =   match proxy_configs.get(&match_path) {
-    Some(proxy_config) => proxy_config,
-    None => todo!(),
-  };
-
-
-    info!("origin uri {}", req.uri());
-    let mut uri_str = match uri.host() {
-        Some(_) => Result::Ok(uri.to_string()),
-        None => match req.headers().get(header::HOST) {
-            Some(host) => match host.to_str() {
-                Ok(host_str) => Result::Ok(format!("http://{}{}", host_str, req.uri())),
-                Err(err) => Result::Err(Box::new(err)),
-            },
-            None => Result::Ok(String::new()),
-        },
+    let paths: Vec<&str> = match uri.path_and_query() {
+        Some(path_and_query) => Ok(path_and_query.as_str().splitn(3, "/").collect()),
+        None => Err(error::Error::NoFoundNamespace),
     }?;
 
-    let real_uri = match uri.host() {
-        Some(_) => {
-            return Ok(uri.clone());
-        },
-        None => {
-            match req.headers().get(header::HOST) {
-                Some(host) => match host.to_str() {
-                    Ok(host_str) => Result::Ok(format!("http://{}{}", host_str, req.uri())),
-                    Err(err) => Result::Err(Box::new(err)),
-                },
-                None => todo!(),
-            },
-        },
-    }?; 
+    let namespace = match paths.get(1) {
+        Some(path) => Ok(String::from(*path)),
+        None => Err(error::Error::NoFoundNamespace),
+    }?;
 
-    if uri_str.starts_with("http:////127.0.0.1:8100/archlinux") {
-    uri_str = uri_str.replace("127.0.0.1:8100/archlinux", "mirrors.bfsu.edu.cn/archlinux");
-    }
+    let proxy_config = match proxy_configs.get(&namespace) {
+        Some(proxy_config) => Ok(proxy_config),
+        None => Err(error::Error::UnknownNamespace {
+            namespace: namespace,
+        }),
+    }?;
 
-    info!("uri_str {}", uri_str);
+    let remote_path = match paths.get(3) {
+        Some(path) => {
+            format!("{}/{}", proxy_config.redirect_url.path(), path)
+        }
+        None => String::from(proxy_config.redirect_url.path()),
+    };
 
-    let stream = TcpStream::connect("mirrors.bfsu.edu.cn:80").await?;
+    info!("remote_path {}", remote_path);
+
+    let stream = TcpStream::connect(format!(
+        "{}:{}",
+        proxy_config.redirect_url.host().unwrap(),
+        proxy_config.redirect_url.port().unwrap()
+    ))
+    .await?;
 
     let (mut sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(stream)).await?;
 
@@ -123,7 +107,7 @@ let proxy_config =   match proxy_configs.get(&match_path) {
     });
 
     let mut builder = Request::builder()
-        .uri(req.uri())
+        .uri(remote_path)
         .method(req.method())
         .version(req.version());
 
@@ -132,12 +116,11 @@ let proxy_config =   match proxy_configs.get(&match_path) {
     for (key, value) in req_headers {
         if key == header::HOST {
             info!("host");
-            builder = builder.header(header::HOST, "mirrors.bfsu.edu.cn");
+            builder = builder.header(header::HOST, proxy_config.redirect_url.host().unwrap());
         } else {
             builder = builder.header(key, value);
         }
     }
-
 
     let proxy_req = builder.body(full(req.collect().await?.to_bytes()))?;
 
@@ -157,38 +140,8 @@ let proxy_config =   match proxy_configs.get(&match_path) {
     return Ok(resp);
 }
 
-fn host_addr(uri: &http::Uri) -> Option<String> {
-    uri.authority().and_then(|auth| Some(auth.to_string()))
-}
-
-fn empty() -> BoxBody<Bytes, hyper::Error> {
-    Empty::<Bytes>::new()
-        .map_err(|never| match never {})
-        .boxed()
-}
-
 fn full<T: Into<Bytes>>(chunk: T) -> BoxBody<Bytes, hyper::Error> {
     Full::new(chunk.into())
         .map_err(|never| match never {})
         .boxed()
-}
-
-// Create a TCP connection to host:port, build a tunnel between the connection and
-// the upgraded connection
-async fn tunnel(upgraded: Upgraded, addr: String) -> std::io::Result<()> {
-    // Connect to remote server
-    let mut server = TcpStream::connect(addr).await?;
-    let mut upgraded = TokioIo::new(upgraded);
-
-    // Proxying data
-    let (from_client, from_server) =
-        tokio::io::copy_bidirectional(&mut upgraded, &mut server).await?;
-
-    // Print message when done
-    println!(
-        "client wrote {} bytes and received {} bytes",
-        from_client, from_server
-    );
-
-    Ok(())
 }
