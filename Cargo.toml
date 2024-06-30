@@ -1,0 +1,18 @@
+[package]
+name = "mirror-proxy"
+version = "0.1.0"
+edition = "2021"
+
+[env]
+
+[dependencies]
+axum = "0.7.5"
+tokio = { version = "1.38.0", features = ["full"] }
+hyper = { version = "1", features = ["full"] }
+pin-project-lite = { version = "0.2.4"}
+bytes = "1.2"
+http = "1"
+http-body = "1"
+http-body-util = "0.1"
+log = "0.4.21"
+simple_logger = "5.0.0"
