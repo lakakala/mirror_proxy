@@ -6,10 +6,12 @@ use error::Result;
 use http::{header, uri::Uri};
 use http_body_util::{combinators::BoxBody, BodyExt, Full};
 use hyper::{server::conn::http1, service::service_fn, Request, Response};
+use hyper_util::rt::TokioIo;
 use log::info;
+use native_tls::TlsConnector;
 use std::{collections::HashMap, error::Error, net::SocketAddr};
 use tokio::net::{TcpListener, TcpStream};
-use utils::tokio_adapter::TokioIo;
+use utils::tls_adapter;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -24,7 +26,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let (stream, remote_addr) = listener.accept().await?;
 
         info!("accept conn {}", remote_addr.to_string());
-        let io = utils::tokio_adapter::TokioIo::new(stream);
+        let io = TokioIo::new(stream);
 
         tokio::task::spawn(async move {
             if let Err(err) = http1::Builder::new()
@@ -47,12 +49,13 @@ struct ProxyConfig {
 async fn proxy(
     req: Request<hyper::body::Incoming>,
 ) -> Result<Response<BoxBody<Bytes, hyper::Error>>, Box<dyn Error + Send + Sync>> {
+    info!("origin_url {}", req.uri().to_string());
     let proxy_configs = HashMap::from([
         (
             String::from("archlinux"),
             ProxyConfig {
                 path: String::from("/archlinux"),
-                redirect_url: Uri::from_static("http://mirrors.bfsu.edu.cn/archlinux"),
+                redirect_url: Uri::from_static("https://mirrors.bfsu.edu.cn/archlinux"),
             },
         ),
         (
@@ -82,7 +85,7 @@ async fn proxy(
         }),
     }?;
 
-    let remote_path = match paths.get(3) {
+    let remote_path = match paths.get(2) {
         Some(path) => {
             format!("{}/{}", proxy_config.redirect_url.path(), path)
         }
@@ -91,14 +94,66 @@ async fn proxy(
 
     info!("remote_path {}", remote_path);
 
-    let stream = TcpStream::connect(format!(
-        "{}:{}",
-        proxy_config.redirect_url.host().unwrap(),
-        proxy_config.redirect_url.port().unwrap()
-    ))
-    .await?;
+    let host = match proxy_config.redirect_url.host() {
+        Some(host) => Ok(host),
+        None => Err(error::Error::IllegalRedireactUrl {
+            redirect_url: proxy_config.redirect_url.to_string(),
+        }),
+    }?;
 
-    let (mut sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(stream)).await?;
+    let port: u16 = match proxy_config.redirect_url.port() {
+        Some(p) => Ok(p.as_u16()),
+        None => match proxy_config.redirect_url.scheme() {
+            Some(scheme) => {
+                if scheme == "http" {
+                    Ok(80)
+                } else if scheme == "https" {
+                    Ok(443)
+                } else {
+                    Err(error::Error::IllegalRedireactUrl {
+                        redirect_url: proxy_config.redirect_url.to_string(),
+                    })
+                }
+            }
+            None => Err(error::Error::IllegalRedireactUrl {
+                redirect_url: proxy_config.redirect_url.to_string(),
+            }),
+        },
+    }?;
+
+    let remote_addr = format!("{}:{}", host, port);
+
+    info!("remote_addr {}", remote_addr);
+
+    let stream = TcpStream::connect(remote_addr).await?;
+
+    let http_stream = match proxy_config.redirect_url.scheme() {
+        Some(scheme) => {
+            if scheme == "http" {
+                Ok(tls_adapter::MaybeHttpsStream::new_http(TokioIo::new(
+                    stream,
+                )))
+            } else if scheme == "https" {
+                let cx = TlsConnector::builder().build()?;
+                let cx = tokio_native_tls::TlsConnector::from(cx);
+
+                let mut stream = cx.connect(host, stream).await?;
+
+                Ok(tls_adapter::MaybeHttpsStream::new_https(TokioIo::new(
+                    stream,
+                )))
+            } else {
+                Err(error::Error::IllegalRedireactUrl {
+                    redirect_url: proxy_config.redirect_url.to_string(),
+                })
+            }
+        }
+        None => Err(error::Error::IllegalRedireactUrl {
+            redirect_url: proxy_config.redirect_url.to_string(),
+        }),
+    }?;
+
+    let (mut sender, conn) = hyper::client::conn::http1::handshake(http_stream).await?;
 
     tokio::task::spawn(async move {
         if let Err(err) = conn.await {
@@ -115,8 +170,8 @@ async fn proxy(
 
     for (key, value) in req_headers {
         if key == header::HOST {
-            info!("host");
-            builder = builder.header(header::HOST, proxy_config.redirect_url.host().unwrap());
+            info!("host {}", host);
+            builder = builder.header(header::HOST, host);
         } else {
             builder = builder.header(key, value);
         }
@@ -129,6 +184,8 @@ async fn proxy(
     let mut resp_builder = Response::builder()
         .status(proxy_resp.status())
         .version(proxy_resp.version());
+
+    info!("proxy_resp status_code {}", proxy_resp.status());
 
     for (key, value) in proxy_resp.headers() {
         resp_builder = resp_builder.header(key, value);

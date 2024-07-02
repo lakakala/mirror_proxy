@@ -8,4 +8,6 @@ pub enum Error {
     NoFoundNamespace,
     #[snafu(display("unknown namespace {}", namespace))]
     UnknownNamespace { namespace: String },
+    #[snafu(display("illegal redirect url {}", redirect_url))]
+    IllegalRedireactUrl{redirect_url: String},
 }
