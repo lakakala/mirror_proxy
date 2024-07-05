@@ -19,7 +19,7 @@ use utils::tls_adapter;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     simple_logger::SimpleLogger::new().init().unwrap();
 
-    let addr = SocketAddr::from(([127, 0, 0, 1], 8100));
+    let addr = SocketAddr::from(([0, 0, 0, 0], 8100));
 
     let listener = TcpListener::bind(addr).await?;
     println!("Listening on http://{}", addr);
