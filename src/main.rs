@@ -64,7 +64,7 @@ async fn proxy(
             String::from("docker"),
             ProxyConfig {
                 path: String::from("/docker"),
-                redirect_url: Uri::from_static("https://registry.docker.com"),
+                redirect_url: Uri::from_static("https://05gomin9.mirror.aliyuncs.com"),
             },
         ),
     ]);
