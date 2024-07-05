@@ -3,8 +3,10 @@ mod utils;
 
 use bytes::Bytes;
 use error::Result;
+use futures_util::{Stream, TryStreamExt};
 use http::{header, uri::Uri};
-use http_body_util::{combinators::BoxBody, BodyExt, Full};
+use http_body::Frame;
+use http_body_util::{combinators::BoxBody, BodyExt, Full, StreamBody};
 use hyper::{server::conn::http1, service::service_fn, Request, Response};
 use hyper_util::rt::TokioIo;
 use log::info;
@@ -177,7 +179,10 @@ async fn proxy(
         }
     }
 
-    let proxy_req = builder.body(full(req.collect().await?.to_bytes()))?;
+    //    let box_body =  BoxBody::new(a);
+    let proxy_req = builder.body(Box::new(
+        StreamBody::new(req.into_data_stream().map_ok(Frame::data)).boxed(),
+    ))?;
 
     let proxy_resp = sender.send_request(proxy_req).await?;
 
@@ -191,14 +196,7 @@ async fn proxy(
         resp_builder = resp_builder.header(key, value);
     }
 
-    let b = proxy_resp.collect().await?.to_bytes();
-    let resp = resp_builder.body(full(b))?;
+    let resp = resp_builder.body(StreamBody::new(proxy_resp.into_data_stream().map_ok(Frame::data)).boxed())?;
 
     return Ok(resp);
-}
-
-fn full<T: Into<Bytes>>(chunk: T) -> BoxBody<Bytes, hyper::Error> {
-    Full::new(chunk.into())
-        .map_err(|never| match never {})
-        .boxed()
 }
