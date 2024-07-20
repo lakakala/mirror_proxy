@@ -35,10 +35,6 @@ impl ProxyStream {
 
         let res = sender.send_request(proxy_req).await.unwrap();
 
-        if res.status() != StatusCode::SWITCHING_PROTOCOLS {
-            panic!("Our server didn't upgrade: {}", res.status());
-        }
-
         let upgraded = hyper::upgrade::on(res).await.unwrap();
 
         Ok(ProxyStream { upgraded })
