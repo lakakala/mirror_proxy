@@ -1,13 +1,13 @@
 mod error;
+mod proxy;
 mod utils;
 
-use axum::extract::path;
 use bytes::Bytes;
 use error::Result;
-use futures_util::{Stream, TryStreamExt};
+use futures_util::TryStreamExt;
 use http::{header, uri::Uri};
 use http_body::Frame;
-use http_body_util::{combinators::BoxBody, BodyExt, Full, StreamBody};
+use http_body_util::{combinators::BoxBody, BodyExt, StreamBody};
 use hyper::{server::conn::http1, service::service_fn, Request, Response};
 use hyper_util::rt::TokioIo;
 use log::info;
@@ -15,6 +15,8 @@ use native_tls::TlsConnector;
 use snafu::ResultExt;
 use std::{collections::HashMap, error::Error, net::SocketAddr};
 use tokio::net::{TcpListener, TcpStream};
+use utils::proxy_adapter;
+use utils::proxy_stream::ProxyStream;
 use utils::tls_adapter;
 
 #[tokio::main]
@@ -48,6 +50,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 struct ProxyConfig {
     path: String,
     redirect_url: Uri,
+    proxy: Option<String>,
 }
 
 async fn proxy(
@@ -60,6 +63,7 @@ async fn proxy(
             ProxyConfig {
                 path: String::from("/archlinux"),
                 redirect_url: Uri::from_static("https://mirrors.bfsu.edu.cn"),
+                proxy: Option::Some(String::from("http://192.168.124.108:7890")),
             },
         ),
         (
@@ -67,6 +71,7 @@ async fn proxy(
             ProxyConfig {
                 path: String::from("/docker"),
                 redirect_url: Uri::from_static("https://05gomin9.mirror.aliyuncs.com"),
+                proxy: Option::Some(String::from("http://192.168.124.108:7890")),
             },
         ),
     ]);
@@ -140,7 +145,12 @@ async fn proxy(
         host, remote_addr, path
     );
 
-    let stream = TcpStream::connect(remote_addr).await?;
+    let stream = match &proxy_config.proxy {
+        Some(proxy_addr) => proxy_adapter::MaybeProxyStream::proxy_stream(
+            ProxyStream::connect(proxy_addr.clone(), remote_addr).await?,
+        ),
+        None => proxy_adapter::MaybeProxyStream::tcp_stream(TcpStream::connect(remote_addr).await?),
+    };
 
     let remote_stream = match proxy_config.redirect_url.scheme() {
         Some(scheme) => {
