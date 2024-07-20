@@ -63,7 +63,7 @@ async fn proxy(
             ProxyConfig {
                 path: String::from("/archlinux"),
                 redirect_url: Uri::from_static("https://mirrors.bfsu.edu.cn"),
-                proxy: Option::Some(String::from("http://192.168.124.200:7890")),
+                proxy: Option::Some(String::from("192.168.124.200:7890")),
             },
         ),
         (
@@ -71,7 +71,7 @@ async fn proxy(
             ProxyConfig {
                 path: String::from("/docker"),
                 redirect_url: Uri::from_static("https://05gomin9.mirror.aliyuncs.com"),
-                proxy: Option::Some(String::from("http://192.168.124.200:7890")),
+                proxy: Option::Some(String::from("192.168.124.200:7890")),
             },
         ),
     ]);
