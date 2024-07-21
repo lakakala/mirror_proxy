@@ -1,5 +1,6 @@
 use crate::error::Result;
 use bytes::Bytes;
+use http::header::HOST;
 use hyper::{Request, StatusCode};
 use hyper_util::rt::TokioIo;
 use pin_project_lite::pin_project;
@@ -15,7 +16,7 @@ pin_project! {
 impl ProxyStream {
     pub async fn connect(proxy_addr: String, addr: String) -> Result<ProxyStream> {
         let proxy_req = Request::builder()
-            .uri(addr)
+            .uri(format!("http://{}", addr))
             .method(http::Method::CONNECT)
             .body(http_body_util::Empty::<Bytes>::new())
             .unwrap();
